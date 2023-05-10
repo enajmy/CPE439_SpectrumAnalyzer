@@ -1,11 +1,9 @@
 /* ---- DMA.c ---- */
 #include "main.h"
 #include "DMA.h"
-#include "arm_math.h"
-#include "arm_const_structs.h"
 
 // Function to initialize DMA for MEM-MEM transfer
-void DMAInit(volatile uint32_t *peripherialAddress, float32_t (*memoryAddress)[ELEMENT_COUNT], bool IRQ_Enable){
+void DMAInit(volatile uint32_t *peripherialAddress, float32_t (*memoryAddress)[SAMPLING_RATE], bool IRQ_Enable){
 
 	// Enable DMA clock
 	RCC->AHB1ENR |= (RCC_AHB1ENR_DMA1EN);
@@ -17,7 +15,7 @@ void DMAInit(volatile uint32_t *peripherialAddress, float32_t (*memoryAddress)[E
 	DMA1_Channel1->CMAR = (uint32_t)(memoryAddress);
 
 	// Set DMA # of data value
-	DMA1_Channel1->CNDTR = ELEMENT_COUNT;
+	DMA1_Channel1->CNDTR = SAMPLING_RATE;
 
 	// Reset DMA1
 	DMA1_Channel1->CCR = 0;
