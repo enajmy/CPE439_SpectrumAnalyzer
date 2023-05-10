@@ -1,7 +1,6 @@
 /* ----------- LPUART.c ------------ */
 #include "main.h"
 #include "LPUART.h"
-#include "delay.h"
 
 // Function to initialize the LPUART
 void LPUARTInit(void){
@@ -96,17 +95,12 @@ void LPUART_Setup_SpectrumAnalyzer(void){
 		LPUART_print("|");
 		LPUART_ESC_Code("\n\r ");
 	}
-	LPUART_print("+------+---------+---------+---------+---------+---------+---------+---------+->");
+	LPUART_print("+---------+---------+---------+---------+---------+---------+---------+-------->");
 	LPUART_ESC_Code("\n\r ");
-	const char *xAxisLabelsPos[8] = {"[5C", "[5C", "[4C", "[4C", "[4C", "[4C", "[4C", "[3C"};
-	const char *xAxisLabels[8] = {"500Hz", "1000Hz", "1500Hz", "2000Hz", "2500Hz", "3000Hz", "3500Hz", "4000Hz"};
-	for (uint8_t i = 0; i < 8; i++){
+	const char *xAxisLabelsPos[7] = {"[8C", "[5C", "[4C", "[4C", "[4C", "[4C", "[4C"};
+	const char *xAxisLabels[7] = {"500Hz", "1000Hz", "1500Hz", "2000Hz", "2500Hz", "3000Hz", "3500Hz"};
+	for (uint8_t i = 0; i < 7; i++){
 		LPUART_ESC_Code(xAxisLabelsPos[i]);
 		LPUART_print(xAxisLabels[i]);
 	}
-
-	/* Output to LPUART */
-	LPUART_ESC_Code("[27;1H");
-	LPUART_print("Max Frequency: ");
-	LPUART_ESC_Code("\n\r ");
 }

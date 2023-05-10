@@ -4,6 +4,7 @@
 #include "main.h"
 #include "gpio.h"
 #include "LPUART.h"
+#include "usart.h"
 #include "delay.h"
 #include "ADC.h"
 #include "DMA.h"
@@ -13,12 +14,17 @@
 #include "arm_const_structs.h"
 
 /* Private defines -----------------------------------------------------------*/
-#define FFT_SIZE 4096
-#define DMA_MEM_ADDR (ADC1->DR)
 #define CLK_SPEED 80000000
+#define DMA_MEM_ADDR (ADC1->DR)
+
 #define SAMPLING_RATE 8192
-#define CAL_FACTOR 175
+#define FFT_SIZE (SAMPLING_RATE / 2)
+#define BIN_SIZE (FFT_SIZE / NUM_COLS)
+
+#define CAL_FACTOR 70
+
 #define NUM_COLS 78
+#define NUM_ROWS 20
 
 #define IRQ_Enable 1
 #define IRQ_Disable 0
@@ -28,16 +34,16 @@
 void SystemClock_Config(void);
 
 /* Task Functions */
-void Task1(void *argument);
-void Task2(void *argument);
+void FFT_Task(void *argument);
+void LPUARTPrint_Task(void *argument);
 
 /* Private variables ---------------------------------------------------------*/
 // Task Handlers
-TaskHandle_t Task1Handler, Task2Handler;
+TaskHandle_t FFT_TaskHandler, LPUARTPrint_TaskHandler;
 
 // Global array for DMA/ADC Storage & FFT Usage
 float32_t fft_inputArray[ELEMENT_COUNT] = {0};
-uint16_t fft_max_freqs_indx[8] = {0};
+uint8_t scaled_amplitudes[NUM_COLS] = {0};
 
 int main(void)
 {
@@ -57,7 +63,7 @@ int main(void)
 	LPUART_Setup_SpectrumAnalyzer();
 
 	/* Configure ADC and DMA Timer Sampling & Memory Transfer */
-	ADC1Init(IRQ_Disable);
+	ADC1Init(IRQ_Enable);
 	DMAInit(&DMA_MEM_ADDR, &fft_inputArray, IRQ_Enable);
 
 	/* Configure timer for proper ADC sampling */
@@ -84,10 +90,10 @@ int main(void)
 	NVIC_SetPriority(DMA1_Channel1_IRQn, NVIC_EncodePriority(4,4,0));
 
 	/* Creation of Tasks */
-	retVal = xTaskCreate(Task1, "Task1", 200 * configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, &Task1Handler);
+	retVal = xTaskCreate(FFT_Task, "FFT_Task", 200 * configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, &FFT_TaskHandler);
 	if (retVal != pdPASS) { while(1); } // task creation failed, get stuck in while loop
 
-	retVal = xTaskCreate(Task2, "Task2", 20* configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, &Task2Handler);
+	retVal = xTaskCreate(LPUARTPrint_Task, "LPUARTPrint_Task", 20* configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, &LPUARTPrint_TaskHandler);
 	if (retVal != pdPASS) { while(1); } // task creation failed, get stuck in while loop
 
 	// Start ADC Conversions
@@ -123,12 +129,9 @@ void DMA1_Channel1_IRQHandler(void){
 		// Set DMA # of data value
 		DMA1_Channel1->CNDTR = ELEMENT_COUNT;
 
-		vTaskNotifyGiveFromISR(Task1Handler, &xHigherPriorityTaskWoken);
+		vTaskNotifyGiveFromISR(FFT_TaskHandler, &xHigherPriorityTaskWoken);
 		portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 	}
-
-	//	// Clear flags
-	//	DMA1->IFCR |= (DMA_IFCR_CTCIF1 | DMA_IFCR_CGIF1 | DMA_IFCR_CHTIF1);
 }
 
 // ADC IRQ Handler Function
@@ -141,24 +144,21 @@ void ADC1_2_IRQHandler(void){
 }
 
 /* --- RTOS Tasks --- */
-// Task 1 - explanation
-void Task1(void *argument) {
+// FFT Task - used to perform the FFT and calculations for printing
+void FFT_Task(void *argument) {
 
 	/* Initialize Variables */
 
 	// Arrays for DMA/ADC Storage & FFT Output
-	float32_t fft_outputArray[ELEMENT_COUNT / 2] = {0};
-	// Used to hold FFT maximum magnitude
-	float32_t fft_max_magnitude = 0;
-	// Amplitude threshold for capturing data peaks
-	float32_t threshold = 0;
-	// Used for indexing into the max freq array
-	uint8_t elementCount = 1;
+	float32_t fft_outputArray[FFT_SIZE] = {0};
+	float32_t fft_plotArray[NUM_COLS], fft_plotArrayAbs[NUM_COLS] = {0};
 
 	for (;;){
 
 
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+		GPIO_DEF_A->ODR |= (GPIO_ODR_OD5);
 
 		// Hanning Window Implementation
 		for (uint16_t i = 0; i < FFT_SIZE; i++) {
@@ -169,57 +169,63 @@ void Task1(void *argument) {
 		arm_rfft_fast_instance_f32 FFT_ARRAY_INST;
 		arm_rfft_fast_init_f32(&FFT_ARRAY_INST, FFT_SIZE);
 		arm_rfft_fast_f32(&FFT_ARRAY_INST, (float32_t *)fft_inputArray, (float32_t *)fft_outputArray, 0);
-		arm_max_f32(&fft_outputArray[1], FFT_SIZE - 1, &fft_max_magnitude, (uint32_t *) &fft_max_freqs_indx[0]);
+		arm_abs_f32((float32_t *)fft_outputArray, (float32_t *)fft_plotArrayAbs, FFT_SIZE);
 
-		// Iterate over the output array to find other major peaks
-		threshold = fft_max_magnitude * 0.1; // Set a threshold of 10% of the maximum value
-		elementCount = 1;
-		for (uint16_t i = 1; i < FFT_SIZE - 1; i++) {
-			if (fft_outputArray[i] > threshold &&
-					fft_outputArray[i] > fft_outputArray[i-1] &&
-					fft_outputArray[i] > fft_outputArray[i+1] &&
-					i > fft_max_freqs_indx[elementCount - 1] - 300 &&
-					i > fft_max_freqs_indx[elementCount - 1] + 300) {
-				// Found a local maximum
-				fft_max_freqs_indx[elementCount++] = i;
+		fft_plotArrayAbs[0] = 0;
+
+		for (uint8_t i = 0; i < (NUM_COLS); i++){
+			float32_t sum = 0;
+			for (uint8_t j = 0; j < (BIN_SIZE); j++) {
+			      sum += fft_plotArrayAbs[(i * BIN_SIZE) + j];
+			    }
+			fft_plotArray[i] = (sum / BIN_SIZE);
+		}
+
+		float32_t max_amp = fft_plotArray[0];
+
+		    // Find the maximum amplitude in the array
+		for (uint8_t i = 1; i < NUM_COLS; i++) {
+			if (fft_plotArray[i] > max_amp) {
+				max_amp = fft_plotArray[i];
 			}
 		}
 
-		for (uint16_t i = 0; i < (FFT_SIZE / NUM_COLS); )
+		// Normalize the amplitudes and generate the bar graph
+		for (int j = 0; j < NUM_COLS; j++) {
+			scaled_amplitudes[j] = (uint8_t)round(fft_plotArray[j] / max_amp * NUM_ROWS);
 
-		xTaskNotifyGive(Task2Handler);
+		}
+
+		GPIO_DEF_A->ODR &= ~(GPIO_ODR_OD5);
+
+		xTaskNotifyGive(LPUARTPrint_TaskHandler);
 	}
 }
 
-// Task 2 - explanation
-void Task2(void *argument) {
+// LPUART Print Task - used for printing to the LPUART
+void LPUARTPrint_Task(void *argument) {
 
 	/* Initialize Variables */
-	char peakColPositons[7][11];
-	char peakFreqToPrint[7][11];
+	char ColPosition[8];
 
 	for (;;){
 
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-		// Line 23 is above x-axis
-		for (uint8_t i = 0; i < 7; i++){
-			if (fft_max_freqs_indx[i] != 0){
-				sprintf(peakColPositons[i], "[23;%uH", (fft_max_freqs_indx[i] / (FFT_SIZE / NUM_COLS)));
-				sprintf(peakFreqToPrint[i], "%u", fft_max_freqs_indx[i]);
-			}
-		}
+		GPIO_DEF_A->ODR |= (GPIO_ODR_OD6);
 
 		LPUART_Setup_SpectrumAnalyzer();
-		for (uint8_t i = 0; i < 7; i++){
-			LPUART_ESC_Code(peakColPositons[i]);
-			LPUART_print("!");
+		LPUART_ESC_Code("[23;2H");
+		for (uint8_t i = 3; i <= 80; i++){
+			for (uint8_t j = 0; j < scaled_amplitudes[i - 3]; j++){
+				LPUART_print("|");
+				LPUART_ESC_Code("[1A\b");
+			}
+			sprintf(ColPosition, "[23;%uH", i);
+			LPUART_ESC_Code(ColPosition);
 		}
-		LPUART_ESC_Code("[28;1H");
-		for (uint8_t i = 0; i < 7; i++){
-			LPUART_print(peakFreqToPrint[i]);
-			LPUART_ESC_Code("\n\r ");
-		}
+
+		GPIO_DEF_A->ODR &= ~(GPIO_ODR_OD6);
 
 		// Reenable timers for ADC conversions
 		TIM1->EGR |= TIM_EGR_UG;
